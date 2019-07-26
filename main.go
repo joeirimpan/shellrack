@@ -19,9 +19,9 @@ const (
 	SELECT EXISTS (
 		SELECT 1 FROM sqlite_master WHERE type='table' AND name='%s' LIMIT 1
 	) AS table_exists`
-	createTableSQL = `CREATE TABLE %s (history_line text, timestamp UNSIGNED BIG INT)`
-	insertTableSQL = `REPLACE INTO %s ('history_line', 'timestamp') VALUES(?,?)`
-	readTableSQL   = `SELECT history_line from %s ORDER BY timestamp DESC`
+	createTableSQL = `CREATE TABLE %s (command, history_line text, timestamp UNSIGNED BIG INT)`
+	insertTableSQL = `REPLACE INTO %s ('command', 'history_line', 'timestamp') VALUES(?,?,?)`
+	readTableSQL   = `SELECT command, history_line from %s ORDER BY timestamp DESC`
 )
 
 var homeLoc = os.Getenv("HOME")
@@ -53,10 +53,10 @@ func initDB(backupFile string) (*sql.DB, error) {
 	return db, nil
 }
 
-func backupDB(db *sql.DB, historyFile string) error {
+func makeCmdMap(historyFile string) (map[string]lineInfo, error) {
 	file, err := os.Open(historyFile)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer file.Close()
 
@@ -81,6 +81,15 @@ func backupDB(db *sql.DB, historyFile string) error {
 		}
 	}
 	if err != io.EOF {
+		return nil, err
+	}
+
+	return cmdHist, nil
+}
+
+func backupDB(db *sql.DB, historyFile string) error {
+	cmdHist, err := makeCmdMap(historyFile)
+	if err != nil {
 		return err
 	}
 
@@ -90,9 +99,9 @@ func backupDB(db *sql.DB, historyFile string) error {
 		return err
 	}
 	i := 0
-	for _, info := range cmdHist {
+	for cmd, info := range cmdHist {
 		if _, err := txn.Exec(fmt.Sprintf(insertTableSQL, backupTable),
-			info.Line, info.Timestamp); err != nil {
+			cmd, info.Line, info.Timestamp); err != nil {
 			return err
 		}
 		i++
@@ -106,6 +115,11 @@ func backupDB(db *sql.DB, historyFile string) error {
 }
 
 func restoreHistory(db *sql.DB, historyFile string) error {
+	cmdHist, err := makeCmdMap(historyFile)
+	if err != nil {
+		return err
+	}
+
 	rows, err := db.Query(fmt.Sprintf(readTableSQL, backupTable))
 	if err != nil {
 		return err
@@ -120,9 +134,16 @@ func restoreHistory(db *sql.DB, historyFile string) error {
 
 	i := 0
 	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
+		var (
+			line string
+			cmd  string
+		)
+		if err := rows.Scan(&cmd, &line); err != nil {
 			return err
+		}
+
+		if _, ok := cmdHist[cmd]; ok {
+			continue
 		}
 		if _, err := file.WriteString(line + "\n"); err != nil {
 			return err
